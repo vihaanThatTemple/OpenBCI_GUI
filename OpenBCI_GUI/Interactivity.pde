@@ -230,6 +230,13 @@ void parseKey(char val) {
         return;
     }
 
+    // Check for speech experiment keyboard shortcuts
+    if (w_speechExperiment != null && w_speechExperiment.getIsActive()) {
+        if (w_speechExperiment.checkForSpeechKeyPress(val, keyCode)) {
+            return;
+        }
+    }
+
     if (currentBoard instanceof Board) {
         output("Expert Mode: '" + key + "' pressed. This is not assigned or applicable to current setup.");
         //((Board)currentBoard).sendCommand(str(key));

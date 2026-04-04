@@ -28,6 +28,7 @@ W_PacketLoss w_packetLoss;
 W_Focus w_focus;
 W_EMGJoystick w_emgJoystick;
 W_Marker w_marker;
+W_SpeechExperiment w_speechExperiment;
 
 //ADD YOUR WIDGET TO WIDGETS OF WIDGETMANAGER
 void setupWidgets(PApplet _this, ArrayList<Widget> w){
@@ -124,6 +125,11 @@ void setupWidgets(PApplet _this, ArrayList<Widget> w){
     w_marker = new W_Marker(_this);
     w_marker.setTitle("Marker");
     addWidget(w_marker, w);
+
+    //Speech Experiment Widget for data collection
+    w_speechExperiment = new W_SpeechExperiment(_this);
+    w_speechExperiment.setTitle("Speech Experiment");
+    addWidget(w_speechExperiment, w);
     
     //DEVELOPERS: Here is an example widget with the essentials/structure in place
     w_template1 = new W_template(_this);
