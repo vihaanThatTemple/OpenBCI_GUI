@@ -43,6 +43,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -381,7 +382,7 @@ def export_session(session_dir, output_base, brainflow_csv_path=None):
         write_info_json(
             os.path.join(out_dir, f"{idx}_info.json"),
             entry["sentence_text"],
-            int(entry["sentence_id"].replace("S", "").replace("s", "")) if entry["sentence_id"][0] in "Ss" else idx,
+            int(m.group()) if (m := re.search(r'\d+', entry["sentence_id"])) else idx,
             emg_array.shape[0],
             audio_len
         )

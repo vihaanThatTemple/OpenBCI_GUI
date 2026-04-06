@@ -614,7 +614,7 @@ class W_SpeechExperiment extends Widget {
         // Just freeze the state to READY so the trial flow stops
         transitionTo(STATE_READY);
         output("Speech Experiment: Session " + sessionId + " paused at sentence " + (currentSentenceIndex + 1) +
-               ". Press F5 to resume recording, or End Session to save and finish.");
+               ". Press S to resume recording, or End Session to save and finish.");
 
         // Safety: write session log now in case app crashes while paused
         if (!practiceMode && sessionLog.size() > 0) {
@@ -638,11 +638,22 @@ class W_SpeechExperiment extends Widget {
 
         if (!practiceMode && sessionLog.size() > 0) {
             writeSessionLog();
-            writeExportConfig(); // Task 24: metadata for Python export script
+            writeExportConfig();
         }
 
-        stopUtteranceAudio(); // just stop the recorder, keep mic alive for next session
+        closeAudio();
         clearAutoSave();
+
+        // Stop BrainFlow data stream so the recording file is closed cleanly.
+        // This must happen AFTER writeSessionLog/writeExportConfig (which need
+        // board info) but BEFORE the summary (so the user sees the stream stopped).
+        if (currentBoard != null && currentBoard.isStreaming()) {
+            try {
+                topNav.stopButtonWasPressed();
+            } catch (Exception e) {
+                verbosePrint("Speech Experiment: Could not stop data stream - " + e.getMessage());
+            }
+        }
 
         // Build summary
         long elapsed = millis() - sessionStartTime;
@@ -820,7 +831,9 @@ class W_SpeechExperiment extends Widget {
             pauseReason = "Switching to " + nextMode + "...";
             transitionTo(STATE_PAUSE);
         } else {
-            // Single mode or parallel phase 1 done: wait for user to press Next
+            // Single mode or parallel phase 1 done: reset phase and wait for Next
+            parallelPhase = 0;
+            updateSpeakingModeForPhase(); // reset mode for potential re-record
             transitionTo(STATE_READY);
         }
         updateButtonStates();
@@ -951,15 +964,14 @@ class W_SpeechExperiment extends Widget {
             reRecord();
             return true;
         }
-        // G = toggle speaking mode (silent/vocalized)
+        // G = toggle speaking mode (silent/vocalized) — only in single trial mode, not while recording
         if (lk == 'g') {
-            println("[SPEECH-KEY]   -> ACTION: toggleMode (trialMode=" + trialModeIndex +
-                    " state=" + getStateName(trialState) + ")");
             if (trialModeIndex == TRIAL_SINGLE && trialState != STATE_RECORDING) {
                 speakingMode = (speakingMode == MODE_SILENT) ? MODE_VOCALIZED : MODE_SILENT;
                 output("Speech Experiment: Mode toggled to " + getSpeakingModeStr());
+                return true;
             }
-            return true; // consume key either way
+            return false; // let other handlers use G if toggle doesn't apply
         }
         // X = End session (double-press to confirm)
         if (lk == 'x') {
