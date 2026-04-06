@@ -755,6 +755,9 @@ class W_SpeechExperiment extends Widget {
         if (!currentlyRecording) return;
         long duration = millis() - recordingStartTime;
 
+        // Task 23: Stop per-utterance audio
+        stopUtteranceAudio();
+
         if (!practiceMode) {
             int startMarker = computeMarker(currentSentenceIndex, speakingMode, 1);
             int stopMarker = computeMarker(currentSentenceIndex, speakingMode, 2);
@@ -833,9 +836,9 @@ class W_SpeechExperiment extends Widget {
     private void writeSessionLog() {
         if (sessionLog.size() == 0) return;
         try {
-            String timestamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
-            String logDir = directoryManager.getRecordingsPath();
-            String fileName = "SpeechExp_Session" + sessionId + "_" + timestamp + ".csv";
+            // Save inside session export directory if available, else fallback
+            String logDir = (sessionExportDir.length() > 0) ? sessionExportDir : directoryManager.getRecordingsPath();
+            String fileName = "session_log.csv";
             sessionLogPath = logDir + fileName;
 
             File dir = new File(logDir);
@@ -1059,7 +1062,9 @@ class W_SpeechExperiment extends Widget {
         int centerX = x + w / 2;
         int centerY = displayY + sentenceDisplayHeight / 2;
 
-        if (trialState == STATE_COUNTDOWN) {
+        if (trialState == STATE_BASELINE_START || trialState == STATE_BASELINE_END) {
+            drawBaselineOverlay(displayY, centerX, centerY);
+        } else if (trialState == STATE_COUNTDOWN) {
             drawCountdownOverlay(displayY, centerX, centerY);
         } else if (trialState == STATE_PAUSE) {
             drawPauseOverlay(displayY, centerX, centerY);
@@ -1517,6 +1522,213 @@ class W_SpeechExperiment extends Widget {
     }
 
     // =========================================================
+    // === Audio Recording (Task 23) ===
+    // =========================================================
+    private void initAudio() {
+        try {
+            minim = new Minim(ourApplet);
+            // Try 16kHz mono; fall back to default if unsupported
+            try {
+                micInput = minim.getLineIn(Minim.MONO, 1024, 16000);
+                actualAudioSampleRate = 16000;
+            } catch (Exception e) {
+                micInput = minim.getLineIn(Minim.MONO, 1024);
+                actualAudioSampleRate = 44100; // Minim default
+                verbosePrint("Speech Experiment: 16kHz not supported, using default sample rate");
+            }
+            audioAvailable = (micInput != null);
+            if (audioAvailable) {
+                verbosePrint("Speech Experiment: Microphone initialized at " + actualAudioSampleRate + "Hz");
+            }
+        } catch (Exception e) {
+            audioAvailable = false;
+            verbosePrint("Speech Experiment: No microphone available - " + e.getMessage());
+        }
+    }
+
+    private void startUtteranceAudio(String filename) {
+        if (!audioAvailable || micInput == null) return;
+        try {
+            // Stop any prior recorder
+            stopUtteranceAudio();
+
+            String wavPath = audioRawDir + filename + ".wav";
+            currentAudioRecorder = minim.createRecorder(micInput, wavPath);
+            currentAudioRecorder.beginRecord();
+            utteranceCounter++;
+            verbosePrint("Speech Experiment: Audio recording started -> " + filename + ".wav");
+        } catch (Exception e) {
+            verbosePrint("Speech Experiment: Audio start failed - " + e.getMessage());
+            currentAudioRecorder = null;
+        }
+    }
+
+    private void stopUtteranceAudio() {
+        if (currentAudioRecorder == null) return;
+        try {
+            currentAudioRecorder.endRecord();
+            currentAudioRecorder.save();
+            verbosePrint("Speech Experiment: Audio saved");
+        } catch (Exception e) {
+            verbosePrint("Speech Experiment: Audio save failed - " + e.getMessage());
+        }
+        currentAudioRecorder = null;
+    }
+
+    private void closeAudio() {
+        stopUtteranceAudio();
+        if (micInput != null) {
+            try { micInput.close(); } catch (Exception e) { /* ignore */ }
+            micInput = null;
+        }
+        // Don't close minim itself — it's shared with the PApplet lifecycle
+    }
+
+    // =========================================================
+    // === Export Directory & Config (Tasks 24-28) ===
+    // =========================================================
+    private void createSessionExportDir() {
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
+        sessionExportDir = directoryManager.getRecordingsPath() +
+            "SpeechExp_Session" + sessionId + "_" + timestamp + File.separator;
+        audioRawDir = sessionExportDir + "audio_raw" + File.separator;
+
+        try {
+            new File(sessionExportDir).mkdirs();
+            new File(audioRawDir).mkdirs();
+            verbosePrint("Speech Experiment: Export dir created: " + sessionExportDir);
+        } catch (Exception e) {
+            outputError("Speech Experiment: Failed to create export directory - " + e.getMessage());
+        }
+    }
+
+    private void writeExportConfig() {
+        if (sessionExportDir.length() == 0) return;
+        try {
+            JSONObject config = new JSONObject();
+
+            // Session metadata
+            config.setInt("session_id", sessionId);
+            config.setString("csv_file_path", csvFilePath);
+            config.setInt("total_sentences", totalSentences);
+            config.setInt("sentences_completed", currentSentenceIndex);
+            config.setInt("recordings_count", sessionLog.size());
+            config.setInt("skipped_count", skippedCount);
+
+            // Trial mode
+            String[] trialNames = {"single", "vocal_then_silent", "silent_then_vocal"};
+            config.setString("trial_mode", trialNames[min(trialModeIndex, 2)]);
+
+            // Board/EMG info
+            int sampleRate = 250; // default
+            int numChannels = 8;  // default
+            try {
+                if (currentBoard != null) {
+                    sampleRate = currentBoard.getSampleRate();
+                    numChannels = currentBoard.getNumEXGChannels();
+                }
+            } catch (Exception e) { /* use defaults */ }
+            config.setInt("emg_sample_rate_hz", sampleRate);
+            config.setInt("emg_num_channels", numChannels);
+            config.setString("board_type", currentBoard != null ? currentBoard.getClass().getSimpleName() : "unknown");
+
+            // Audio info
+            config.setBoolean("audio_available", audioAvailable);
+            config.setInt("audio_sample_rate_hz", actualAudioSampleRate);
+            config.setString("audio_format", "wav");
+            config.setString("audio_dir", "audio_raw");
+
+            // Marker encoding reference
+            config.setString("marker_encoding", "(sentence_index+1)*10 + mode*2 + event");
+            config.setString("marker_mode_0", "silent");
+            config.setString("marker_mode_1", "vocalized");
+            config.setString("marker_event_1", "start");
+            config.setString("marker_event_2", "stop");
+
+            // Task 27: Document sampling rate difference
+            config.setInt("gaddy_original_sample_rate_hz", 1000);
+            config.setInt("gaddy_target_resample_hz", 800);
+            if (sampleRate == 1000) {
+                config.setString("sampling_rate_note",
+                    "Sample rate matches Gaddy & Klein (2020) at 1000Hz. " +
+                    "No resampling adjustments needed in read_emg.py.");
+            } else {
+                config.setString("sampling_rate_note",
+                    "OpenBCI records at " + sampleRate + "Hz, not 1000Hz as in Gaddy & Klein (2020). " +
+                    "Cyton serial (USB dongle/Bluetooth) is limited to 250Hz. " +
+                    "Cyton WiFi Shield supports 250/500/1000/2000/4000/8000/16000Hz. " +
+                    "The ML pipeline (read_emg.py) resamples from 1000Hz to 800Hz. " +
+                    "For " + sampleRate + "Hz data, adjust resampling: upsample to 800Hz or modify " +
+                    "conv downsampling factors in the model architecture.");
+            }
+
+            // Task 28: clean_audio flag
+            config.setBoolean("needs_clean_audio", true);
+            config.setString("clean_audio_note",
+                "Run clean_audio.py from the Gaddy pipeline on the exported audio " +
+                "to remove silence and normalize levels before training.");
+
+            // Baseline info
+            config.setInt("baseline_duration_ms", (int) BASELINE_DURATION);
+            config.setString("baseline_start_audio", "audio_raw/baseline_start.wav");
+            config.setString("baseline_end_audio", "audio_raw/baseline_end.wav");
+
+            // Session log reference
+            config.setString("session_log", "session_log.csv");
+
+            // BrainFlow data file hint (user needs to locate this)
+            config.setString("brainflow_data_note",
+                "Locate the BrainFlow-RAW CSV file from this recording session. " +
+                "It is typically in the same Recordings directory or a subfolder. " +
+                "The marker channel in that CSV contains the integer markers from this experiment.");
+
+            // Gaddy directory structure reference
+            config.setString("export_structure_note",
+                "Run the companion export_gaddy.py script to convert this session " +
+                "into the Gaddy-compatible directory structure: " +
+                "silent_parallel_data/, voiced_parallel_data/, nonparallel_data/");
+
+            String configPath = sessionExportDir + "export_config.json";
+            saveJSONObject(config, configPath);
+            outputSuccess("Speech Experiment: Export config saved to export_config.json");
+
+        } catch (Exception e) {
+            outputError("Speech Experiment: Failed to write export config - " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // =========================================================
+    // === Baseline Overlay Drawing (Task 25) ===
+    // =========================================================
+    private void drawBaselineOverlay(int displayY, int centerX, int centerY) {
+        boolean isStart = (trialState == STATE_BASELINE_START);
+        long elapsed = millis() - stateStartTime;
+        int remainSec = max(0, (int) Math.ceil((BASELINE_DURATION - elapsed) / 1000.0));
+
+        // Pulsing recording indicator
+        float pulse = 0.5 + 0.5 * sin(millis() * 0.005);
+        fill(lerpColor(color(60, 60, 80), recordingColor, pulse));
+        textAlign(CENTER, CENTER);
+        textFont(p3, 26);
+        text(isStart ? "Recording Baseline Silence" : "Recording End Baseline", centerX, centerY - 30);
+
+        fill(countdownColor);
+        textFont(p3, 64);
+        text("" + remainSec, centerX, centerY + 30);
+
+        fill(180);
+        textFont(p4, 16);
+        text("Please remain still and silent", centerX, centerY + 75);
+
+        if (audioAvailable) {
+            fill(practiceColor);
+            textFont(p5, 12);
+            text("Microphone active", centerX, centerY + 100);
+        }
+    }
+
+    // =========================================================
     // === Public Accessors ===
     // =========================================================
     public boolean isSessionActive() { return sessionActive; }
@@ -1528,6 +1740,8 @@ class W_SpeechExperiment extends Widget {
     public String getSessionLogPath() { return sessionLogPath; }
     public int getRecordingCount() { return sessionLog.size(); }
     public int getSkippedCount() { return skippedCount; }
+    public String getSessionExportDir() { return sessionExportDir; }
+    public boolean isAudioAvailable() { return audioAvailable; }
 }
 
 // =========================================================
