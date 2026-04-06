@@ -196,7 +196,9 @@ static class ConsoleWindow extends PApplet implements Runnable {
             } else {
                 println("ConsoleLog: ERROR - Unable to open console log as text file...");
             }
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            println("ConsoleLog: Error opening log file - " + e.getMessage());
+        }
     }
 
     void copyFullTextToClipboard() {

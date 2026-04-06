@@ -19,22 +19,52 @@ synchronized void keyPressed() {
         return;
     }
 
-    //note that the Processing variable "key" is the keypress as an ASCII character
-    //note that the Processing variable "keyCode" is the keypress as a JAVA keycode.  This differs from ASCII
-    //println("OpenBCI_GUI: keyPressed: key = " + key + ", int(key) = " + int(key) + ", keyCode = " + keyCode);
+    // === DEBUG KEY LOGGER ===
+    boolean isCoded = (key == CODED);
+    println("[KEY-DBG] keyPressed: char='" + key + "' int=" + int(key) +
+            " keyCode=" + keyCode + " coded=" + isCoded +
+            " millis=" + millis());
 
     //Check for Copy/Paste text keyboard shortcuts before anything else.
     if (copyPaste.checkIfPressedAllOS()) {
+        println("[KEY-DBG]   -> consumed by copyPaste");
         return;
     }
 
     boolean anyActiveTextfields = textfieldUpdateHelper.getAnyTextfieldsActive();
+    boolean cpOpen = controlPanel.isOpen;
 
-    if(!controlPanel.isOpen && !anyActiveTextfields){ //don't parse the key if the control panel is open
-        if (guiSettings.getExpertModeBoolean() || key == ' ') { //Check if Expert Mode is On or Spacebar has been pressed
-            if ((int(key) >=32) && (int(key) <= 126)) {  //32 through 126 represent all the usual printable ASCII characters
-                parseKey(key);
+    println("[KEY-DBG]   cpOpen=" + cpOpen + " textFieldActive=" + anyActiveTextfields);
+
+    // Speech experiment keys checked BEFORE Expert Mode gate — they use alphabet keys
+    // and must work regardless of Expert Mode setting
+    if (!cpOpen && !anyActiveTextfields) {
+        boolean speechWidgetExists = (w_speechExperiment != null);
+        boolean speechWidgetActive = speechWidgetExists && w_speechExperiment.getIsActive();
+        println("[KEY-DBG]   speechWidget: exists=" + speechWidgetExists + " active=" + speechWidgetActive);
+        if (speechWidgetActive) {
+            boolean handled = w_speechExperiment.checkForSpeechKeyPress(key, keyCode);
+            println("[KEY-DBG]   speechWidget.checkForSpeechKeyPress -> handled=" + handled);
+            if (handled) {
+                return;
             }
+        }
+    } else {
+        println("[KEY-DBG]   -> BLOCKED: cpOpen=" + cpOpen + " textField=" + anyActiveTextfields);
+    }
+
+    if(!cpOpen && !anyActiveTextfields){
+        boolean expertMode = guiSettings.getExpertModeBoolean();
+        println("[KEY-DBG]   expertMode=" + expertMode + " isSpace=" + (key == ' '));
+        if (expertMode || key == ' ') {
+            if ((int(key) >=32) && (int(key) <= 126)) {
+                println("[KEY-DBG]   -> dispatching to parseKey('" + key + "')");
+                parseKey(key);
+            } else {
+                println("[KEY-DBG]   -> BLOCKED: char " + int(key) + " outside ASCII 32-126");
+            }
+        } else {
+            println("[KEY-DBG]   -> BLOCKED: not expert mode and not space");
         }
     }
 
@@ -228,13 +258,6 @@ void parseKey(char val) {
     // Check for software marker keyboard shortcuts
     if (w_marker.checkForMarkerKeyPress(val)) {
         return;
-    }
-
-    // Check for speech experiment keyboard shortcuts
-    if (w_speechExperiment != null && w_speechExperiment.getIsActive()) {
-        if (w_speechExperiment.checkForSpeechKeyPress(val, keyCode)) {
-            return;
-        }
     }
 
     if (currentBoard instanceof Board) {

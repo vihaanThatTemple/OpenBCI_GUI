@@ -121,7 +121,35 @@ def load_brainflow_csv(csv_path, config):
     The marker channel index depends on the board type.
     """
     print(f"  Loading BrainFlow data: {csv_path}")
-    data = np.loadtxt(csv_path, delimiter=",", skiprows=0)
+    with open(csv_path, "r") as f:
+        first_line = f.readline()
+    sep = "\t" if "\t" in first_line else ","
+    print(f"  Detected delimiter: {'TAB' if sep == '\t' else 'COMMA'}")
+
+    # BrainFlow CSVs can have inconsistent column counts and corrupted values
+    # (board restarts, buffer glitches). Parse line-by-line and skip bad rows.
+    rows = []
+    skipped = 0
+    target_cols = None
+    with open(csv_path, "r") as f:
+        for line_num, line in enumerate(f):
+            vals = line.strip().split(sep)
+            try:
+                parsed = [float(v) if v else 0.0 for v in vals]
+            except ValueError:
+                skipped += 1
+                continue
+            # Lock column count to the first valid row
+            if target_cols is None:
+                target_cols = len(parsed)
+            if len(parsed) != target_cols:
+                skipped += 1
+                continue
+            rows.append(parsed)
+    if skipped > 0:
+        print(f"  Skipped {skipped} malformed rows")
+    data = np.array(rows, dtype=np.float64)
+
     print(f"  Shape: {data.shape} ({data.shape[0]} samples, {data.shape[1]} columns)")
     return data
 
@@ -136,12 +164,13 @@ def find_marker_channel(data, config):
     for col_idx in range(num_cols - 1, max(num_cols - 5, -1), -1):
         col = data[:, col_idx]
         non_zero = col[col != 0]
-        if len(non_zero) > 0:
-            # Check if values match our marker encoding pattern
+        if len(non_zero) > 0 and len(non_zero) < data.shape[0] * 0.1:
+            # Marker channel: sparse non-zero values, mostly small integers
             vals = set(non_zero.astype(int))
-            # Markers should be 11-999 range, with specific patterns
-            if all(10 < v < 1000 for v in vals):
-                print(f"  Marker channel detected at column {col_idx} ({len(non_zero)} markers)")
+            # Check if ANY values match our marker encoding (11+ range)
+            marker_like = [v for v in vals if 10 < v < 1000]
+            if len(marker_like) >= 2:  # at least one start+stop pair
+                print(f"  Marker channel detected at column {col_idx} ({len(non_zero)} non-zero, {len(marker_like)} marker-like)")
                 return col_idx
     return None
 
@@ -302,30 +331,29 @@ def export_session(session_dir, output_base, brainflow_csv_path=None):
 
     # 5. Export per-utterance files
     audio_dir = os.path.join(session_dir, "audio_raw")
-    mode_counters = {}  # track index per mode/directory
+    # Track per-directory counters (not per-mode, to avoid overwrites when
+    # multiple modes map to the same directory in nonparallel/single mode)
+    dir_counters = {}  # out_dir -> next index
 
-    # 5a. Baseline start (utterance 0 in each output dir)
-    for mode, out_dir in dir_map.items():
+    # 5a. Baseline start (utterance 0 in each UNIQUE output dir)
+    unique_dirs = list(set(dir_map.values()))
+    for out_dir in unique_dirs:
         idx = 0
-        mode_counters[mode] = 1  # next real utterance starts at 1
+        dir_counters[out_dir] = 1  # next real utterance starts at 1
 
-        # EMG baseline from start of recording
+        emg_samples = 0
         if bf_data is not None:
             baseline_emg = create_silence_segment(bf_data, marker_col, config,
                                                    duration_sec=5.0, from_start=True)
             np.save(os.path.join(out_dir, f"{idx}_emg.npy"), baseline_emg.astype(np.float32))
+            emg_samples = baseline_emg.shape[0]
 
-        # Audio baseline
         baseline_wav = os.path.join(audio_dir, "baseline_start.wav")
         audio_out = os.path.join(out_dir, f"{idx}_audio.flac")
         convert_wav_to_flac(baseline_wav, audio_out)
 
-        # Info + button
-        write_info_json(os.path.join(out_dir, f"{idx}_info.json"),
-                       "", -1,
-                       baseline_emg.shape[0] if bf_data is not None else 0)
-        write_button_npy(os.path.join(out_dir, f"{idx}_button.npy"),
-                        baseline_emg.shape[0] if bf_data is not None else 0)
+        write_info_json(os.path.join(out_dir, f"{idx}_info.json"), "", -1, emg_samples)
+        write_button_npy(os.path.join(out_dir, f"{idx}_button.npy"), emg_samples)
 
     print(f"  Exported baseline start as utterance 0\n")
 
@@ -333,8 +361,8 @@ def export_session(session_dir, output_base, brainflow_csv_path=None):
     for seg_idx, (emg_array, entry) in enumerate(segments):
         mode = entry["speaking_mode"]  # "silent" or "vocalized"
         out_dir = dir_map.get(mode, list(dir_map.values())[0])
-        idx = mode_counters.get(mode, 1)
-        mode_counters[mode] = idx + 1
+        idx = dir_counters.get(out_dir, 1)
+        dir_counters[out_dir] = idx + 1
 
         # EMG
         np.save(os.path.join(out_dir, f"{idx}_emg.npy"), emg_array.astype(np.float32))
@@ -364,24 +392,23 @@ def export_session(session_dir, output_base, brainflow_csv_path=None):
         print(f"  [{mode}] {idx}: {entry['sentence_id']} "
               f"({emg_array.shape[0]} samples, {emg_array.shape[0]/config['emg_sample_rate_hz']:.2f}s)")
 
-    # 5c. Baseline end (final utterance in each output dir)
-    for mode, out_dir in dir_map.items():
-        idx = mode_counters.get(mode, 1)
+    # 5c. Baseline end (final utterance in each UNIQUE output dir)
+    for out_dir in unique_dirs:
+        idx = dir_counters.get(out_dir, 1)
 
+        emg_samples = 0
         if bf_data is not None:
             baseline_emg = create_silence_segment(bf_data, marker_col, config,
                                                    duration_sec=5.0, from_start=False)
             np.save(os.path.join(out_dir, f"{idx}_emg.npy"), baseline_emg.astype(np.float32))
+            emg_samples = baseline_emg.shape[0]
 
         baseline_wav = os.path.join(audio_dir, "baseline_end.wav")
         audio_out = os.path.join(out_dir, f"{idx}_audio.flac")
         convert_wav_to_flac(baseline_wav, audio_out)
 
-        write_info_json(os.path.join(out_dir, f"{idx}_info.json"),
-                       "", -1,
-                       baseline_emg.shape[0] if bf_data is not None else 0)
-        write_button_npy(os.path.join(out_dir, f"{idx}_button.npy"),
-                        baseline_emg.shape[0] if bf_data is not None else 0)
+        write_info_json(os.path.join(out_dir, f"{idx}_info.json"), "", -1, emg_samples)
+        write_button_npy(os.path.join(out_dir, f"{idx}_button.npy"), emg_samples)
 
     print(f"\n  Exported baseline end as final utterance")
 
@@ -389,7 +416,7 @@ def export_session(session_dir, output_base, brainflow_csv_path=None):
     print("\n" + "=" * 60)
     print("EXPORT COMPLETE")
     print(f"  Output: {output_base}")
-    total = sum(mode_counters.values())
+    total = sum(dir_counters.values())
     print(f"  Total utterances: {total} (including 2 baselines per directory)")
     print(f"  EMG sample rate: {config['emg_sample_rate_hz']}Hz")
     if config['emg_sample_rate_hz'] == 1000:

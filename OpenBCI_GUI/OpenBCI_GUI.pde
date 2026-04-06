@@ -659,7 +659,7 @@ void initSystem() {
             if (res.getValue().startsWith("no daisy to attach")) {
                 haltSystem();
                 outputError("User selected Cyton+Daisy, but no Daisy is attached. Please change Channel Count to 8 Channels.");
-                //controlPanel.openPanel();
+                controlPanel.openPanel();
                 return;
             }
         }
@@ -705,7 +705,7 @@ void initSystem() {
     if (abandonInit) {
         haltSystem();
         outputError("Failed to initialize board. Please check that the board is on and has power. See Console Log for more details.");
-        //controlPanel.openPanel();
+        controlPanel.openPanel();
         return;
     } else {
         //initilize the secondary topnav and all applicable widgets

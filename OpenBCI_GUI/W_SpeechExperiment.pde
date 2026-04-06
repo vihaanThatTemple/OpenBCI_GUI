@@ -12,9 +12,9 @@
 //  Trial states:                                   //
 //    IDLE → READY → COUNTDOWN → RECORDING → PAUSE  //
 //                                                  //
-//  Shortcuts (F-keys, no conflicts with GUI):       //
-//    F5=record, F6=next, F7=pause, F8=re-record,   //
-//    F9=toggle mode, F10=end (2x), F1=help,         //
+//  Shortcuts (alphabet keys):                        //
+//    S=record, D=next, P=pause, R=re-record,        //
+//    G=toggle mode, X=end (2x), H=help,             //
 //    +/-=font size                                   //
 //                                                  //
 //////////////////////////////////////////////////////
@@ -47,16 +47,7 @@ class W_SpeechExperiment extends Widget {
     private static final int MIN_FONT_SIZE = 16;
     private static final int MAX_FONT_SIZE = 48;
 
-    // === F-Key Codes (java.awt.event.KeyEvent values) ===
-    private static final int KEY_F1  = 112;
-    private static final int KEY_F5  = 116;
-    private static final int KEY_F6  = 117;
-    private static final int KEY_F7  = 118;
-    private static final int KEY_F8  = 119;
-    private static final int KEY_F9  = 120;
-    private static final int KEY_F10 = 121;
-
-    // === End Session Safety (double-press F10) ===
+    // === End Session Safety (double-press X) ===
     private boolean endSessionPending = false;
     private long endSessionPendingTime = 0;
     private static final long END_SESSION_CONFIRM_MS = 2000;
@@ -120,6 +111,7 @@ class W_SpeechExperiment extends Widget {
 
     // === Timing ===
     private long recordingStartTime = 0;
+    private long recordingStartEpoch = 0; // Fix 6: wall-clock epoch for log
     private long currentSentenceStartTime = 0;
 
     // === Session Log ===
@@ -143,6 +135,10 @@ class W_SpeechExperiment extends Widget {
     private boolean isSyntheticBoard = false;
     private boolean isPlaybackBoard = false;
 
+    // === Active Recording State (Fix 3: capture at start, not stop) ===
+    private int activeStartMarker = 0;
+    private int activeRecordingSpeakingMode = MODE_VOCALIZED;
+
     // === Audio Recording (Task 23) ===
     private Minim minim;
     private AudioInput micInput;
@@ -153,7 +149,6 @@ class W_SpeechExperiment extends Widget {
     // === Export Directory (Tasks 24-26) ===
     private String sessionExportDir = "";  // per-session folder
     private String audioRawDir = "";       // audio_raw/ subfolder
-    private int utteranceCounter = 0;      // sequential file index
 
     // === Baseline Recording (Task 25) ===
     private static final long BASELINE_DURATION = 5000; // 5 seconds
@@ -245,7 +240,7 @@ class W_SpeechExperiment extends Widget {
         pauseSessionButton.onRelease(new CallbackListener() {
             public void controlEvent(CallbackEvent theEvent) { pauseSession(); }
         });
-        pauseSessionButton.setDescription("Pause session (F7)");
+        pauseSessionButton.setDescription("Pause session (P)");
 
         // Task 18: End Session button (beside Pause)
         endSessionButton = createButton(localCP5, "speechEndSession", "End Session",
@@ -254,7 +249,7 @@ class W_SpeechExperiment extends Widget {
         endSessionButton.onRelease(new CallbackListener() {
             public void controlEvent(CallbackEvent theEvent) { endSession(); }
         });
-        endSessionButton.setDescription("End session, save log, show summary (F10 x2)");
+        endSessionButton.setDescription("End session, save log, show summary (X x2)");
 
         practiceToggleButton = createButton(localCP5, "speechPracticeToggle", "Practice: OFF",
             x + pad + (bW + 10) * 2 + 200, row1Y, 110, bH, p4, 12, colorNotPressed, OPENBCI_DARKBLUE);
@@ -271,7 +266,7 @@ class W_SpeechExperiment extends Widget {
         startStopRecButton.onRelease(new CallbackListener() {
             public void controlEvent(CallbackEvent theEvent) { handleRecordButton(); }
         });
-        startStopRecButton.setDescription("Start or stop recording (F5)");
+        startStopRecButton.setDescription("Start or stop recording (S)");
 
         nextSentenceButton = createButton(localCP5, "speechNextSentence", "Next \u2192",
             x + pad + 150, row2Y, 100, 30, p4, 14, colorNotPressed, OPENBCI_DARKBLUE);
@@ -279,7 +274,7 @@ class W_SpeechExperiment extends Widget {
         nextSentenceButton.onRelease(new CallbackListener() {
             public void controlEvent(CallbackEvent theEvent) { skipToNextSentence(); }
         });
-        nextSentenceButton.setDescription("Next sentence (F6)");
+        nextSentenceButton.setDescription("Next sentence (D)");
 
         reRecordButton = createButton(localCP5, "speechReRecord", "Re-record \u21BA",
             x + pad + 260, row2Y, 110, 30, p4, 14, colorNotPressed, OPENBCI_DARKBLUE);
@@ -287,7 +282,7 @@ class W_SpeechExperiment extends Widget {
         reRecordButton.onRelease(new CallbackListener() {
             public void controlEvent(CallbackEvent theEvent) { reRecord(); }
         });
-        reRecordButton.setDescription("Re-record current sentence/mode (F8)");
+        reRecordButton.setDescription("Re-record current sentence/mode (R)");
 
         updateButtonStates();
     }
@@ -300,7 +295,6 @@ class W_SpeechExperiment extends Widget {
         updateTrialFlow();
         periodicStreamCheck();
         periodicAutoSave();
-        periodicBoardTypeCheck();
     }
 
     // =========================================================
@@ -336,6 +330,13 @@ class W_SpeechExperiment extends Widget {
         }
         markerChannelAvailable = hasMarkerCh;
         streamingWarningActive = sessionActive && !practiceMode && (!streaming || !hasMarkerCh);
+
+        // Board type detection (merged from periodicBoardTypeCheck)
+        if (currentBoard != null) {
+            String boardName = currentBoard.getClass().getSimpleName();
+            isSyntheticBoard = boardName.contains("Synthetic");
+            isPlaybackBoard = boardName.contains("Playback");
+        }
     }
 
     // =========================================================
@@ -453,19 +454,6 @@ class W_SpeechExperiment extends Widget {
     }
 
     // =========================================================
-    // === Board Type Detection (Task 22) ===
-    // =========================================================
-    private void periodicBoardTypeCheck() {
-        // Only check once per stream-check interval (piggyback on same timer)
-        if (millis() - lastStreamCheckTime > 100) return; // just ran stream check
-        if (currentBoard == null) return;
-
-        String boardName = currentBoard.getClass().getSimpleName();
-        isSyntheticBoard = boardName.contains("Synthetic");
-        isPlaybackBoard = boardName.contains("Playback");
-    }
-
-    // =========================================================
     // === Trial State Machine ===
     // =========================================================
     private void updateTrialFlow() {
@@ -517,37 +505,22 @@ class W_SpeechExperiment extends Widget {
     }
 
     private void transitionTo(int newState) {
+        println("[SPEECH-FSM] transition: " + getStateName(trialState) + " -> " + getStateName(newState) +
+                " millis=" + millis());
         trialState = newState;
         stateStartTime = millis();
     }
 
+    // Only called for parallel mode inter-mode pause (switching vocalized<->silent on same sentence)
     private void onPauseComplete() {
-        if (parallelPhase == 0 && trialModeIndex != TRIAL_SINGLE) {
-            parallelPhase = 1;
-            updateSpeakingModeForPhase();
-            if (countdownDuration > 0) {
-                transitionTo(STATE_COUNTDOWN);
-            } else {
-                transitionTo(STATE_RECORDING);
-                beginRecording();
-            }
+        // Switch to second mode for the same sentence
+        parallelPhase = 1;
+        updateSpeakingModeForPhase();
+        if (countdownDuration > 0) {
+            transitionTo(STATE_COUNTDOWN);
         } else {
-            parallelPhase = 0;
-            if (!practiceMode) {
-                advanceToNextSentence();
-            } else {
-                transitionTo(STATE_READY);
-                updateSpeakingModeForPhase();
-            }
-
-            if (trialState != STATE_IDLE) {
-                if (sessionActive && recordingModeIndex == 1 && currentSentenceIndex < sentences.size()) {
-                    transitionTo(countdownDuration > 0 ? STATE_COUNTDOWN : STATE_RECORDING);
-                    if (countdownDuration == 0) beginRecording();
-                } else if (sessionActive) {
-                    transitionTo(STATE_READY);
-                }
-            }
+            transitionTo(STATE_RECORDING);
+            beginRecording();
         }
         updateButtonStates();
     }
@@ -599,6 +572,9 @@ class W_SpeechExperiment extends Widget {
     private void startSession() {
         if (!runPreSessionChecklist()) return;
 
+        // Re-init audio if it was closed (e.g. widget teardown)
+        if (!audioAvailable && micInput == null) initAudio();
+
         sessionActive = true;
         sessionStartTime = millis();
         currentSentenceIndex = 0;
@@ -606,7 +582,6 @@ class W_SpeechExperiment extends Widget {
         parallelPhase = 0;
         recordingIndex = 0;
         skippedCount = 0;
-        utteranceCounter = 0;
         sessionLog.clear();
         sessionLogPath = "";
         updateSpeakingModeForPhase();
@@ -633,15 +608,24 @@ class W_SpeechExperiment extends Widget {
     }
 
     private void pauseSession() {
+        println("[SPEECH-ACT] pauseSession: state=" + getStateName(trialState));
         if (trialState == STATE_RECORDING) endRecording();
-        sessionActive = false;
-        transitionTo(STATE_IDLE);
-        output("Speech Experiment: Session " + sessionId + " paused at sentence " + (currentSentenceIndex + 1));
+        // Keep sessionActive=true so End Session button stays visible
+        // Just freeze the state to READY so the trial flow stops
+        transitionTo(STATE_READY);
+        output("Speech Experiment: Session " + sessionId + " paused at sentence " + (currentSentenceIndex + 1) +
+               ". Press F5 to resume recording, or End Session to save and finish.");
+
+        // Safety: write session log now in case app crashes while paused
+        if (!practiceMode && sessionLog.size() > 0) {
+            writeSessionLog();
+        }
         updateButtonStates();
     }
 
-    // Manual end session (F10 double-press) — skips end baseline
+    // Manual end session (X double-press) — skips end baseline
     private void endSession() {
+        println("[SPEECH-ACT] endSession: state=" + getStateName(trialState));
         if (trialState == STATE_RECORDING) endRecording();
         stopUtteranceAudio(); // stop any in-progress audio
         finalizeSession();
@@ -657,7 +641,7 @@ class W_SpeechExperiment extends Widget {
             writeExportConfig(); // Task 24: metadata for Python export script
         }
 
-        closeAudio();
+        stopUtteranceAudio(); // just stop the recorder, keep mic alive for next session
         clearAutoSave();
 
         // Build summary
@@ -674,13 +658,24 @@ class W_SpeechExperiment extends Widget {
             " | Duration: " + mins + "m " + secs + "s";
         if (sessionLogPath.length() > 0) summary += " | Log: " + sessionExportDir;
         output(summary);
+        sessionId++;
         updateButtonStates();
     }
 
     private void handleRecordButton() {
-        if (!sessionActive || currentSentenceIndex >= sentences.size()) return;
-        if (!acquireActionLock()) return;
+        println("[SPEECH-ACT] handleRecordButton: sessionActive=" + sessionActive +
+                " sentIdx=" + currentSentenceIndex + "/" + sentences.size() +
+                " state=" + getStateName(trialState));
+        if (!sessionActive || currentSentenceIndex >= sentences.size()) {
+            println("[SPEECH-ACT]   -> REJECTED: session not active or past end");
+            return;
+        }
+        if (!acquireActionLock()) {
+            println("[SPEECH-ACT]   -> REJECTED: action lock cooldown (last=" + lastActionTime + " now=" + millis() + ")");
+            return;
+        }
 
+        println("[SPEECH-ACT]   -> PROCEEDING in state " + getStateName(trialState));
         switch (trialState) {
             case STATE_READY:
                 transitionTo(countdownDuration > 0 ? STATE_COUNTDOWN : STATE_RECORDING);
@@ -701,7 +696,12 @@ class W_SpeechExperiment extends Widget {
     }
 
     private void skipToNextSentence() {
-        if (!acquireActionLock()) return;
+        println("[SPEECH-ACT] skipToNextSentence: state=" + getStateName(trialState) +
+                " sentIdx=" + currentSentenceIndex);
+        if (!acquireActionLock()) {
+            println("[SPEECH-ACT]   -> REJECTED: action lock cooldown");
+            return;
+        }
         if (trialState == STATE_RECORDING) endRecording();
 
         // Task 15: Count skips
@@ -719,8 +719,16 @@ class W_SpeechExperiment extends Widget {
     }
 
     private void reRecord() {
-        if (!sessionActive || currentSentenceIndex >= sentences.size()) return;
-        if (!acquireActionLock()) return;
+        println("[SPEECH-ACT] reRecord: state=" + getStateName(trialState) +
+                " sentIdx=" + currentSentenceIndex);
+        if (!sessionActive || currentSentenceIndex >= sentences.size()) {
+            println("[SPEECH-ACT]   -> REJECTED: not active or past end");
+            return;
+        }
+        if (!acquireActionLock()) {
+            println("[SPEECH-ACT]   -> REJECTED: action lock cooldown");
+            return;
+        }
         if (trialState == STATE_RECORDING) endRecording();
         transitionTo(STATE_READY);
         output("Speech Experiment: Ready to re-record sentence " + (currentSentenceIndex + 1) +
@@ -729,9 +737,12 @@ class W_SpeechExperiment extends Widget {
     }
 
     private void beginRecording() {
+        println("[SPEECH-ACT] beginRecording: sentIdx=" + currentSentenceIndex +
+                " mode=" + getSpeakingModeStr() + " practiceMode=" + practiceMode);
         if (currentSentenceIndex >= sentences.size()) return;
         currentlyRecording = true;
         recordingStartTime = millis();
+        recordingStartEpoch = System.currentTimeMillis();
 
         // Task 23: Start per-utterance audio recording
         String sid = sentences.get(currentSentenceIndex).id;
@@ -740,6 +751,8 @@ class W_SpeechExperiment extends Widget {
 
         if (!practiceMode) {
             int markerValue = computeMarker(currentSentenceIndex, speakingMode, 1);
+            activeStartMarker = markerValue;
+            activeRecordingSpeakingMode = speakingMode;
             boolean markerOk = insertSpeechMarker(markerValue);
             output("Speech Experiment: REC START - " + sid +
                    " [" + getSpeakingModeStr() + "] (Marker: " + markerValue + ")" +
@@ -752,6 +765,8 @@ class W_SpeechExperiment extends Widget {
     }
 
     private void endRecording() {
+        println("[SPEECH-ACT] endRecording: currentlyRecording=" + currentlyRecording +
+                " sentIdx=" + currentSentenceIndex + " millis=" + millis());
         if (!currentlyRecording) return;
         long duration = millis() - recordingStartTime;
 
@@ -759,22 +774,23 @@ class W_SpeechExperiment extends Widget {
         stopUtteranceAudio();
 
         if (!practiceMode) {
-            int startMarker = computeMarker(currentSentenceIndex, speakingMode, 1);
-            int stopMarker = computeMarker(currentSentenceIndex, speakingMode, 2);
+            int startMarker = activeStartMarker;
+            int stopMarker = computeMarker(currentSentenceIndex, activeRecordingSpeakingMode, 2);
             boolean markerOk = insertSpeechMarker(stopMarker);
 
+            String modeStr = (activeRecordingSpeakingMode == MODE_SILENT) ? "Silent" : "Vocalized";
             String sid = currentSentenceIndex < sentences.size() ? sentences.get(currentSentenceIndex).id : "N/A";
             String sentText = currentSentenceIndex < sentences.size() ? sentences.get(currentSentenceIndex).text : "";
             output("Speech Experiment: REC STOP - " + sid +
-                   " [" + getSpeakingModeStr() + "] (" + duration + "ms, Marker: " + stopMarker + ")" +
+                   " [" + modeStr + "] (" + duration + "ms, Marker: " + stopMarker + ")" +
                    (markerOk ? "" : " [MARKER FAILED]"));
 
             validateRecordingDuration(duration, sid);
 
             recordingIndex++;
             sessionLog.add(new SpeechLogEntry(
-                sessionId, sid, sentText, getSpeakingModeStr().toLowerCase(),
-                startMarker, stopMarker, recordingStartTime, millis(), duration, recordingIndex
+                sessionId, sid, sentText, modeStr.toLowerCase(),
+                startMarker, stopMarker, recordingStartEpoch, System.currentTimeMillis(), duration, recordingIndex
             ));
         } else {
             output("Speech Experiment: REC STOP [PRACTICE] (" + duration + "ms)");
@@ -798,14 +814,15 @@ class W_SpeechExperiment extends Widget {
     private void endRecordingAndAdvance() {
         endRecording();
         if (parallelPhase == 0 && trialModeIndex != TRIAL_SINGLE) {
+            // Parallel mode: auto-switch to second mode for SAME sentence
             currentPauseDuration = interModePause;
             String nextMode = (trialModeIndex == TRIAL_VOCAL_THEN_SILENT) ? "Silent" : "Vocalized";
             pauseReason = "Switching to " + nextMode + "...";
+            transitionTo(STATE_PAUSE);
         } else {
-            currentPauseDuration = interSentencePause;
-            pauseReason = "Next sentence...";
+            // Single mode or parallel phase 1 done: wait for user to press Next
+            transitionTo(STATE_READY);
         }
-        transitionTo(STATE_PAUSE);
         updateButtonStates();
     }
 
@@ -842,7 +859,10 @@ class W_SpeechExperiment extends Widget {
             sessionLogPath = logDir + fileName;
 
             File dir = new File(logDir);
-            if (!dir.exists()) dir.mkdirs();
+            if (!dir.exists() && !dir.mkdirs()) {
+                outputError("Speech Experiment: Cannot create directory: " + logDir);
+                return;
+            }
 
             PrintWriter writer = createWriter(sessionLogPath);
             writer.println("session_id,sentence_id,sentence_text,speaking_mode,start_marker,stop_marker,start_timestamp_ms,stop_timestamp_ms,duration_ms,recording_index");
@@ -872,54 +892,104 @@ class W_SpeechExperiment extends Widget {
     public void mouseReleased() { super.mouseReleased(); }
 
     public boolean checkForSpeechKeyPress(char keyPress, int keyCodePress) {
-        boolean isCoded = (keyPress == CODED);
+        char lk = Character.toLowerCase(keyPress);
 
-        // F1 = toggle help overlay (works even when session not active)
-        if (isCoded && keyCodePress == KEY_F1) {
+        println("[SPEECH-KEY] checkForSpeechKeyPress: char='" + keyPress + "' lk='" + lk +
+                "' sessionActive=" + sessionActive + " trialState=" + getStateName(trialState) +
+                " recording=" + currentlyRecording + " millis=" + millis());
+
+        // H = toggle help overlay (works even when session not active)
+        if (lk == 'h') {
+            println("[SPEECH-KEY]   -> ACTION: toggleHelp");
             showHelpOverlay = !showHelpOverlay;
             return true;
         }
 
         // +/- to adjust font size (always available)
         if (keyPress == '+' || keyPress == '=') {
+            println("[SPEECH-KEY]   -> ACTION: fontSizeUp -> " + (sentenceFontSize + 2));
             sentenceFontSize = min(sentenceFontSize + 2, MAX_FONT_SIZE);
             return true;
         }
         if (keyPress == '-' || keyPress == '_') {
+            println("[SPEECH-KEY]   -> ACTION: fontSizeDown -> " + (sentenceFontSize - 2));
             sentenceFontSize = max(sentenceFontSize - 2, MIN_FONT_SIZE);
             return true;
         }
 
-        if (!isCoded || !sessionActive) return false;
+        if (!sessionActive) {
+            println("[SPEECH-KEY]   -> REJECTED: session not active");
+            return false;
+        }
 
         // Any session key press cancels a pending end-session confirmation
-        if (keyCodePress != KEY_F10) {
+        if (lk != 'x') {
             endSessionPending = false;
         }
 
-        if (keyCodePress == KEY_F5) { handleRecordButton(); return true; }
-        if (keyCodePress == KEY_F6) { skipToNextSentence(); return true; }
-        if (keyCodePress == KEY_F7) { pauseSession(); return true; }
-        if (keyCodePress == KEY_F8) { reRecord(); return true; }
-        if (keyCodePress == KEY_F9) {
+        // S = Start/Stop recording
+        if (lk == 's') {
+            println("[SPEECH-KEY]   -> ACTION: handleRecordButton (state=" + getStateName(trialState) + ")");
+            handleRecordButton();
+            return true;
+        }
+        // D = Done / next sentence
+        if (lk == 'd') {
+            println("[SPEECH-KEY]   -> ACTION: skipToNextSentence (idx=" + currentSentenceIndex + ")");
+            skipToNextSentence();
+            return true;
+        }
+        // P = Pause session
+        if (lk == 'p') {
+            println("[SPEECH-KEY]   -> ACTION: pauseSession");
+            pauseSession();
+            return true;
+        }
+        // R = Re-record current
+        if (lk == 'r') {
+            println("[SPEECH-KEY]   -> ACTION: reRecord (idx=" + currentSentenceIndex + ")");
+            reRecord();
+            return true;
+        }
+        // G = toggle speaking mode (silent/vocalized)
+        if (lk == 'g') {
+            println("[SPEECH-KEY]   -> ACTION: toggleMode (trialMode=" + trialModeIndex +
+                    " state=" + getStateName(trialState) + ")");
             if (trialModeIndex == TRIAL_SINGLE && trialState != STATE_RECORDING) {
                 speakingMode = (speakingMode == MODE_SILENT) ? MODE_VOCALIZED : MODE_SILENT;
                 output("Speech Experiment: Mode toggled to " + getSpeakingModeStr());
-                return true;
             }
+            return true; // consume key either way
         }
-        if (keyCodePress == KEY_F10) {
+        // X = End session (double-press to confirm)
+        if (lk == 'x') {
+            println("[SPEECH-KEY]   -> ACTION: endSession (pending=" + endSessionPending + ")");
             if (endSessionPending && (millis() - endSessionPendingTime) < END_SESSION_CONFIRM_MS) {
                 endSessionPending = false;
                 endSession();
             } else {
                 endSessionPending = true;
                 endSessionPendingTime = millis();
-                output("Speech Experiment: Press F10 again to confirm end session");
+                output("Speech Experiment: Press X again to confirm end session");
             }
             return true;
         }
+        println("[SPEECH-KEY]   -> NOT MATCHED: '" + lk + "'");
         return false;
+    }
+
+    // Debug helper: state name for logging
+    private String getStateName(int state) {
+        switch (state) {
+            case STATE_IDLE: return "IDLE";
+            case STATE_READY: return "READY";
+            case STATE_COUNTDOWN: return "COUNTDOWN";
+            case STATE_RECORDING: return "RECORDING";
+            case STATE_PAUSE: return "PAUSE";
+            case STATE_BASELINE_START: return "BASELINE_START";
+            case STATE_BASELINE_END: return "BASELINE_END";
+            default: return "UNKNOWN(" + state + ")";
+        }
     }
 
     // =========================================================
@@ -1010,9 +1080,9 @@ class W_SpeechExperiment extends Widget {
 
         String helpText;
         if (!sessionActive) {
-            helpText = "Load CSV and start session to begin  |  F1=Help  +/-=Font size";
+            helpText = "Load CSV and start session to begin  |  H=Help  +/-=Font size";
         } else {
-            helpText = "F5=Record  F6=Next  F7=Pause  F8=Re-record  F9=Mode  F10=End  F1=Help  +/-=Font";
+            helpText = "S=Record  D=Next  P=Pause  R=Re-record  G=Mode  X=End  H=Help  +/-=Font";
         }
         text(helpText, x + 10, panelY + controlPanelHeight - 5);
 
@@ -1186,7 +1256,7 @@ class W_SpeechExperiment extends Widget {
         textAlign(CENTER, TOP);
         if (trialState == STATE_READY) {
             fill(180);
-            text("Press F5 to start recording", centerX, displayY + 10);
+            text("Press S to start recording", centerX, displayY + 10);
         } else if (trialState == STATE_RECORDING) {
             fill(recordingColor);
             long recElapsed = millis() - recordingStartTime;
@@ -1223,13 +1293,13 @@ class W_SpeechExperiment extends Widget {
         int startY = topY + 35;
 
         String[][] shortcuts = {
-            {"F5", "Start / Stop recording"},
-            {"F6", "Next sentence (skip)"},
-            {"F7", "Pause session"},
-            {"F8", "Re-record current"},
-            {"F9", "Toggle Silent/Vocalized"},
-            {"F10", "End session (press 2x)"},
-            {"F1", "Toggle this help"},
+            {"S", "Start / Stop recording"},
+            {"D", "Done - next sentence"},
+            {"P", "Pause session"},
+            {"R", "Re-record current"},
+            {"G", "Toggle Silent/Vocalized"},
+            {"X", "End session (press 2x)"},
+            {"H", "Toggle this help"},
             {"+/-", "Increase/decrease font"},
         };
 
@@ -1289,10 +1359,6 @@ class W_SpeechExperiment extends Widget {
     private int computeMarker(int sentenceIndex, int mode, int event) {
         return (sentenceIndex + 1) * 10 + mode * 2 + event;
     }
-
-    private int markerToSentenceIndex(int marker) { return (marker / 10) - 1; }
-    private int markerToMode(int marker) { return (marker % 10) / 2; }
-    private boolean markerIsStart(int marker) { return (marker % 2) == 1; }
 
     private boolean insertSpeechMarker(int value) {
         if (currentBoard instanceof BoardBrainFlow) {
@@ -1555,7 +1621,6 @@ class W_SpeechExperiment extends Widget {
             String wavPath = audioRawDir + filename + ".wav";
             currentAudioRecorder = minim.createRecorder(micInput, wavPath);
             currentAudioRecorder.beginRecord();
-            utteranceCounter++;
             verbosePrint("Speech Experiment: Audio recording started -> " + filename + ".wav");
         } catch (Exception e) {
             verbosePrint("Speech Experiment: Audio start failed - " + e.getMessage());
@@ -1581,7 +1646,11 @@ class W_SpeechExperiment extends Widget {
             try { micInput.close(); } catch (Exception e) { /* ignore */ }
             micInput = null;
         }
-        // Don't close minim itself — it's shared with the PApplet lifecycle
+        if (minim != null) {
+            try { minim.stop(); } catch (Exception e) { /* ignore */ }
+            minim = null;
+        }
+        audioAvailable = false;
     }
 
     // =========================================================
@@ -1593,13 +1662,17 @@ class W_SpeechExperiment extends Widget {
             "SpeechExp_Session" + sessionId + "_" + timestamp + File.separator;
         audioRawDir = sessionExportDir + "audio_raw" + File.separator;
 
-        try {
-            new File(sessionExportDir).mkdirs();
-            new File(audioRawDir).mkdirs();
-            verbosePrint("Speech Experiment: Export dir created: " + sessionExportDir);
-        } catch (Exception e) {
-            outputError("Speech Experiment: Failed to create export directory - " + e.getMessage());
+        File expDir = new File(sessionExportDir);
+        File audDir = new File(audioRawDir);
+        if (!expDir.exists() && !expDir.mkdirs()) {
+            outputError("Speech Experiment: Cannot create export directory: " + sessionExportDir);
+            return;
         }
+        if (!audDir.exists() && !audDir.mkdirs()) {
+            outputError("Speech Experiment: Cannot create audio directory: " + audioRawDir);
+            return;
+        }
+        verbosePrint("Speech Experiment: Export dir created: " + sessionExportDir);
     }
 
     private void writeExportConfig() {
@@ -1634,7 +1707,7 @@ class W_SpeechExperiment extends Widget {
 
             // Audio info
             config.setBoolean("audio_available", audioAvailable);
-            config.setInt("audio_sample_rate_hz", actualAudioSampleRate);
+            config.setInt("audio_sample_rate_hz", audioAvailable ? actualAudioSampleRate : 0);
             config.setString("audio_format", "wav");
             config.setString("audio_dir", "audio_raw");
 

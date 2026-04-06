@@ -1,0 +1,33 @@
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> READY : startSession()\n[checklist passes]
+    
+    READY --> COUNTDOWN : S key\n[countdown > 0]
+    READY --> RECORDING : S key\n[countdown = 0]
+    
+    COUNTDOWN --> READY : S key\n(cancel)
+    COUNTDOWN --> RECORDING : timer expires\n(3s or 5s)
+    
+    RECORDING --> PAUSE : S key / auto-stop\nendRecordingAndAdvance()
+    
+    PAUSE --> COUNTDOWN : parallel phase 0 done\nswitch to phase 1\n[countdown > 0]
+    PAUSE --> RECORDING : parallel phase 0 done\n[countdown = 0]
+    PAUSE --> READY : sentence done\n[manual mode]
+    PAUSE --> COUNTDOWN : sentence done\n[continuous mode]
+    PAUSE --> IDLE : last sentence done\nendSession()
+    
+    READY --> IDLE : P key / pauseSession()
+    RECORDING --> IDLE : P key / pauseSession()
+    COUNTDOWN --> IDLE : P key / pauseSession()
+    
+    READY --> IDLE : E key / endSession()
+    
+    RECORDING --> READY : R key / reRecord()
+    READY --> READY : R key (no-op,\nstay on same sentence)
+
+    note right of IDLE : No session active.\nLoad CSV, configure dropdowns.
+    note right of READY : Sentence displayed.\nAwaiting S key.
+    note right of COUNTDOWN : "Large 3..2..1 overlay.\nCue: SPEAK or THINK"
+    note right of RECORDING : Markers inserted.\nBlinking REC dot + timer.
+    note right of PAUSE : Brief delay.\nShows reason text.
